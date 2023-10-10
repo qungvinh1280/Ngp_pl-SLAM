@@ -18,7 +18,7 @@ from icecream import ic
 import argparse
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Instant-SLAM")
+    parser = argparse.ArgumentParser(description="Ngp_pl-SLAM")
 
     # SLAM ARGS
     parser.add_argument("--parallel_run", action="store_true", help="Whether to run in parallel")
@@ -57,6 +57,69 @@ def parse_args():
 
     parser.add_argument("--eval", action="store_true", help="Evaluate method.")
 
+
+    ############################################# Ngp_pl parameter #################################################################
+    # dataset parameters
+    parser.add_argument('--split', type=str, default='train',
+                        choices=['train', 'trainval', 'trainvaltest'],
+                        help='use which split to train')
+    parser.add_argument('--downsample', type=float, default=1.0,
+                        help='downsample factor (<=1.0) for the images')
+
+    parser.add_argument('--scale', type=float, default=0.5,
+                        help='scene scale (whole scene must lie in [-scale, scale]^3')
+    parser.add_argument('--use_exposure', action='store_true', default=False,
+                        help='whether to train in HDR-NeRF setting')
+
+    # loss parameters
+    parser.add_argument('--distortion_loss_w', type=float, default=0,
+                        help='''weight of distortion loss (see losses.py),
+                        0 to disable (default), to enable,
+                        a good value is 1e-3 for real scene and 1e-2 for synthetic scene
+                        ''')
+    
+    # training options
+    parser.add_argument('--batch_size', type=int, default=8192,
+                        help='number of rays in a batch')
+    parser.add_argument('--ray_sampling_strategy', type=str, default='all_images',
+                        choices=['all_images', 'same_image'],
+                        help='''
+                        all_images: uniformly from all pixels of ALL images
+                        same_image: uniformly from all pixels of a SAME image
+                        ''')
+    parser.add_argument('--num_epochs', type=int, default=30,
+                        help='number of training epochs')
+    parser.add_argument('--num_gpus', type=int, default=1,
+                        help='number of gpus')
+    parser.add_argument('--lr', type=float, default=1e-2,
+                        help='learning rate')
+    
+    # experimental training options
+    parser.add_argument('--optimize_ext', action='store_true', default=False,
+                        help='whether to optimize extrinsics')
+    parser.add_argument('--random_bg', action='store_true', default=False,
+                        help='''whether to train with random bg color (real scene only)
+                        to avoid objects with black color to be predicted as transparent
+                        ''')
+    
+    # validation options
+    parser.add_argument('--eval_lpips', action='store_true', default=False,
+                        help='evaluate lpips metric (consumes more VRAM)')
+    parser.add_argument('--val_only', action='store_true', default=False,
+                        help='run only validation (need to provide ckpt_path)')
+    parser.add_argument('--no_save_test', action='store_true', default=False,
+                        help='whether to save test image and video')
+
+    # misc
+    parser.add_argument('--exp_name', type=str, default='exp',
+                        help='experiment name')
+    parser.add_argument('--ckpt_path', type=str, default=None,
+                        help='pretrained checkpoint to load (including optimizers, etc)')
+    parser.add_argument('--weight_path', type=str, default=None,
+                        help='pretrained checkpoint to load (excluding optimizers, etc)')
+    
+    #########################################################################################################################
+
     return parser.parse_args()
 
 def run(args):
@@ -77,13 +140,10 @@ def run(args):
         from torch.multiprocessing import Queue
 
     # Create the Queue object
-    data_for_viz_output_queue = Queue()
-    data_for_fusion_output_queue = Queue()
+
     data_output_queue = Queue()
     slam_output_queue_for_fusion = Queue()
-    slam_output_queue_for_o3d = Queue()
-    fusion_output_queue_for_gui = Queue()
-    gui_output_queue_for_fusion = Queue()
+
 
     # Create Dataset provider
     data_provider_module = DataModule(args.dataset_name, args, device=cpu)
@@ -105,40 +165,17 @@ def run(args):
             slam_module.register_output_queue(slam_output_queue_for_fusion)
             fusion_module.register_input_queue("slam", slam_output_queue_for_fusion)
         
-        if (args.fusion == 'nerf' and not slam) or (args.fusion != 'nerf' and args.eval):
-            # Only used for evaluation, or in case we do not use slam (for nerf)
-            data_provider_module.register_output_queue(data_for_fusion_output_queue)
-            fusion_module.register_input_queue("data", data_for_fusion_output_queue)
-
-
-    # Create interactive Gui
-    gui = args.gui and args.fusion != 'nerf' # nerf has its own gui
-    if gui:
-        gui_module = GuiModule("Open3DGui", args, device=cuda_slam) # don't use cuda:1, o3d doesn't work...
-        data_provider_module.register_output_queue(data_for_viz_output_queue)
-        if slam:
-            slam_module.register_output_queue(slam_output_queue_for_o3d)
-        gui_module.register_input_queue("data", data_for_viz_output_queue)
-        gui_module.register_input_queue("slam", slam_output_queue_for_o3d)
-        if fusion and (fusion_module.name == "tsdf" or fusion_module.name == "sigma"):
-            fusion_module.register_output_queue(fusion_output_queue_for_gui)
-            gui_module.register_input_queue("fusion", fusion_output_queue_for_gui)
-            gui_module.register_output_queue(gui_output_queue_for_fusion)
-            fusion_module.register_input_queue("gui", gui_output_queue_for_fusion)
-
     # Run
     if args.parallel_run:
         print("Running pipeline in parallel mode.")
 
         data_provider_thread = Process(target=data_provider_module.spin, args=())
         if fusion: fusion_thread = Process(target=fusion_module.spin) # FUSION NEEDS TO BE IN A PROCESS
-        #if slam: slam_thread = Process(target=slam_module.spin, args=())
-        if gui: gui_thread = Process(target=gui_module.spin, args=())
+
 
         data_provider_thread.start()
         if fusion: fusion_thread.start()
-        #if slam: slam_thread.start()
-        if gui: gui_thread.start()
+
 
         # Runs in main thread
         if slam: 
@@ -152,44 +189,32 @@ def run(args):
         while (fusion and fusion_thread.exitcode == None):
             continue
         print("FINISHED RUNNING FUSION")
-        while (gui and not gui_module.shutdown):
-            continue
-        print("FINISHED RUNNING GUI")
 
-        # This is not doing what you think, because Process has another module
-        if gui: gui_module.shutdown_module()
         if fusion: fusion_module.shutdown_module()
         data_provider_module.shutdown_module()
 
-        if gui: gui_thread.terminate() # violent, should be join()
-        #if slam: slam_thread.terminate() # violent, should be join()
         if fusion: fusion_thread.terminate() # violent, should be join()
         data_provider_thread.terminate() # violent, should be a join(), but I don't know how to flush the queue
     else:
         print("Running pipeline in sequential mode.")
 
-        # Initialize all modules first (and register 3D volume)
+
         if data_provider_module.spin() \
             and (not slam or slam_module.spin()) \
             and (not fusion or fusion_module.spin()):
-            if gui:
-                gui_module.spin()
-                #gui_module.register_volume(fusion_module.fusion.volume)
+            pass
 
-        # Run sequential, dataprovider fills queue and gui empties it
         while data_provider_module.spin() \
             and (not slam or slam_module.spin()) \
-            and (not fusion or fusion_module.spin()) \
-            and (not gui or gui_module.spin()):
+            and (not fusion or fusion_module.spin()):
             continue
 
-        # Then gui runs indefinitely until user closes window
         ok = True
         while ok:
-            if gui: ok &= gui_module.spin()
+
             if fusion: ok &= fusion_module.spin()
 
-    # Delete everything and clean memory
+
 
 if __name__ == '__main__':
     args = parse_args()
