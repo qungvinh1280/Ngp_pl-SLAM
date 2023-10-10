@@ -119,7 +119,6 @@ def parse_args():
                         help='pretrained checkpoint to load (excluding optimizers, etc)')
     
     #########################################################################################################################
-
     return parser.parse_args()
 
 def run(args):
@@ -144,7 +143,6 @@ def run(args):
     data_output_queue = Queue()
     slam_output_queue_for_fusion = Queue()
 
-
     # Create Dataset provider
     data_provider_module = DataModule(args.dataset_name, args, device=cpu)
 
@@ -168,14 +166,12 @@ def run(args):
     # Run
     if args.parallel_run:
         print("Running pipeline in parallel mode.")
-
+        
         data_provider_thread = Process(target=data_provider_module.spin, args=())
         if fusion: fusion_thread = Process(target=fusion_module.spin) # FUSION NEEDS TO BE IN A PROCESS
 
-
         data_provider_thread.start()
         if fusion: fusion_thread.start()
-
 
         # Runs in main thread
         if slam: 
@@ -211,10 +207,7 @@ def run(args):
 
         ok = True
         while ok:
-
             if fusion: ok &= fusion_module.spin()
-
-
 
 if __name__ == '__main__':
     args = parse_args()
