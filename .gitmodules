@@ -12,3 +12,12 @@
 	path = thirdparty/gtsam
 	url = https://github.com/borglab/gtsam.git
 	branch = develop
+[submodule "Ngp_pl-SLAM_test"]
+	path = Ngp_pl-SLAM_test
+	url = https://github.com/qungvinh1280/Ngp_pl-SLAM_test.git
+[submodule "thirdparty/ngp"]
+	path = thirdparty/ngp
+	url = https://github.com/qungvinh1280/Ngp_pl-SLAM_test.git
+[submodule "thirdparty/ngp_pl"]
+	path = thirdparty/ngp_pl
+	url = https://github.com/qungvinh1280/Ngp_pl-SLAM_test.git
