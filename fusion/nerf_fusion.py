@@ -12,6 +12,56 @@ import glob
 from utils.utils import *
 import warnings; warnings.filterwarnings("ignore")
 
+###################################################################
+from torch import nn
+# from opt import get_opts
+import os
+import glob
+import imageio
+import numpy as np
+import cv2
+from einops import rearrange
+import time
+
+
+from examples.slam_demo import parse_args
+
+# data
+from torch.utils.data import DataLoader
+
+from thirdparty.ngp_pl.datasets.nerf import NeRFDataset
+from thirdparty.ngp_pl.datasets.ray_utils import axisangle_to_R, get_rays
+
+# models
+from kornia.utils.grid import create_meshgrid3d
+from thirdparty.ngp_pl.models.networks import NGP
+from thirdparty.ngp_pl.models.rendering import render, MAX_SAMPLES
+
+# optimizer, losses
+from apex.optimizers import FusedAdam
+# from thirdparty.ngp_pl.apex.optimizers import FusedAdam
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from thirdparty.ngp_pl.losses import NeRFLoss
+
+# metrics
+from torchmetrics import (
+    PeakSignalNoiseRatio, 
+    StructuralSimilarityIndexMeasure
+)
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+
+# pytorch-lightning
+from pytorch_lightning.plugins import DDPPlugin
+from pytorch_lightning import LightningModule, Trainer
+from pytorch_lightning.callbacks import TQDMProgressBar, ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.utilities.distributed import all_gather_ddp_if_available
+
+from thirdparty.ngp_pl.utils import slim_ckpt, load_ckpt
+
+import warnings; warnings.filterwarnings("ignore")
+from thirdparty.ngp_pl.train import NeRFSystem
+###################################################################
 
 class NerfFusion:
     def __init__(self, name, args, device) -> None:
@@ -22,6 +72,7 @@ class NerfFusion:
         self.device = device
         self.viz = False
         self.mask_type = args.mask_type # "ours", "ours_w_thresh" or "raw", "no_depth"
+        self.split = args.split
 
     def process_data(self, packet):
         # GROUND_TRUTH Fitting
@@ -166,12 +217,61 @@ class NerfFusion:
         focal_length = intrinsics[:2]
         # print('----------------------------------------------------------------------', focal_length)
         principal_point = intrinsics[2:]
+        split = self.split
         # print('11111111111111111111111111111111111111111111111111111111111111111111111', principal_point)
         # TODO: we need to restore the self.ref_frames[frame_id] = [image, gt, etc] for evaluation....
-        # self.ngp.nerf.training.update_training_images(list(frame_ids),
-        #                                               list(poses[:, :3, :4]), 
-        #                                               list(images), 
-        #                                               list(depths), 
-        #                                               list(depths_cov), resolution, principal_point, focal_length, depth_scale, depth_cov_scale)
-        print(list(frame_ids))
+        # print('before send', resolution)
+        TrainDataset = NeRFDataset(list(frame_ids),
+                        list(poses[:, :3, :4]), 
+                        list(images), 
+                        list(depths), 
+                        list(depths_cov), resolution, principal_point, focal_length, depth_scale, depth_cov_scale, split)
+        # print(TrainDataset.read_intrinsics)
         # print('-------------------------------------------------------', depths_cov.shape)
+    
+        # hparams = parse_args()
+        # # print(hparams)
+        # if hparams.val_only and (not hparams.ckpt_path):
+        #     raise ValueError('You need to provide a @ckpt_path for validation!')
+        # system = NeRFSystem(hparams)
+
+        # ckpt_cb = ModelCheckpoint(dirpath=f'ckpts/{hparams.dataset_name}/{hparams.exp_name}',
+        #                         filename='{epoch:d}',
+        #                         save_weights_only=True,
+        #                         every_n_epochs=hparams.num_epochs,
+        #                         save_on_train_epoch_end=True,
+        #                         save_top_k=-1)
+        # callbacks = [ckpt_cb, TQDMProgressBar(refresh_rate=1)]
+
+        # logger = TensorBoardLogger(save_dir=f"logs/{hparams.dataset_name}",
+        #                         name=hparams.exp_name,
+        #                         default_hp_metric=False)
+
+        # trainer = Trainer(max_epochs=hparams.num_epochs,
+        #                 check_val_every_n_epoch=hparams.num_epochs,
+        #                 callbacks=callbacks,
+        #                 logger=logger,
+        #                 enable_model_summary=False,
+        #                 accelerator='gpu',
+        #                 devices=hparams.num_gpus,
+        #                 strategy=DDPPlugin(find_unused_parameters=False)
+        #                         if hparams.num_gpus>1 else None,
+        #                 num_sanity_val_steps=-1 if hparams.val_only else 0,
+        #                 precision=16)
+
+        # trainer.fit(system, ckpt_path=hparams.ckpt_path)
+
+        # if not hparams.val_only: # save slimmed ckpt for the last epoch
+        #     ckpt_ = \
+        #         slim_ckpt(f'ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}.ckpt',
+        #                 save_poses=hparams.optimize_ext)
+        #     torch.save(ckpt_, f'ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}_slim.ckpt')
+
+        # if not hparams.no_save_test: # save video
+        #     imgs = sorted(glob.glob(os.path.join(system.val_dir, '*.png')))
+        #     imageio.mimsave(os.path.join(system.val_dir, 'rgb.mp4'),
+        #                     [imageio.imread(img) for img in imgs[::2]],
+        #                     fps=30, macro_block_size=1)
+        #     imageio.mimsave(os.path.join(system.val_dir, 'depth.mp4'),
+        #                     [imageio.imread(img) for img in imgs[1::2]],
+        #                     fps=30, macro_block_size=1)
